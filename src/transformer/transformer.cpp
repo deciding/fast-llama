@@ -277,8 +277,8 @@ bool ParallelTransformer::parallel_thread_init(
         int rem = num_rows % tgi->num_threads;
         std::pair<int, int> res;
         if (tgi->thread_id < rem) {
-            res.first  = (itv + 1) * tgi->thread_id;
-            res.second = itv + 1;
+            res.first  = (itv + 1) * tgi->thread_id; // start (offset)
+            res.second = itv + 1; // num
         } else {
             res.first  = (itv + 1) * rem + itv * (tgi->thread_id - rem);
             res.second = itv;
@@ -293,7 +293,7 @@ bool ParallelTransformer::parallel_thread_init(
         auto nr = std::min(s.rows() - offset, rows);
         for (int i = 0; i < s.layers(); ++i) {
             auto src = s[i].slice(offset, offset+nr);
-            auto tgt = t[i].slice(copied, copied+nr);
+            auto tgt = t[i].slice(copied, copied+nr); // copied: t offset
             if (tgt.is_quantized() && !src.is_quantized()) {
                 tgt.quantize(src);
             } else {
@@ -313,8 +313,8 @@ bool ParallelTransformer::parallel_thread_init(
             return false;
         }
 
-        int nr = copy_layers(td.w.qkv, tfw.attn_q, 0, offset, rows);
-        nr += copy_layers(td.w.qkv, tfw.attn_k, nr, offset + nr - _tfc.dim, rows - nr);
+        int nr = copy_layers(td.w.qkv, tfw.attn_q, 0, offset, rows); // copy q
+        nr += copy_layers(td.w.qkv, tfw.attn_k, nr, offset + nr - _tfc.dim, rows - nr); // copy k
         copy_layers(td.w.qkv, tfw.attn_v, nr, offset + nr - _tfc.dim - _tfc.kv_dim, rows - nr);
     }
     if (auto [offset, rows] = split_rows(TaskType::ATTN_O, _tfc.dim); rows > 0) {

@@ -19,13 +19,17 @@ import itertools
 import numpy as np
 from pathlib        import Path
 from enum           import Enum
-from dataclasses    import dataclass
+from dataclasses    import dataclass, field
 from sentencepiece  import SentencePieceProcessor
 from abc            import ABCMeta, abstractmethod
 from typing         import IO, TYPE_CHECKING, Any, Callable, Generator, Iterable, Literal, Sequence, TypeVar
 
+from safetensors.numpy import load_file
+
 #if TYPE_CHECKING:
 from typing import TypeAlias
+
+FLMF_FILE_EXT = 'flm'
 
 NDArray: TypeAlias = 'np.ndarray[Any, Any]'
 
@@ -52,6 +56,7 @@ class SpecialTokenType(Enum):
     BOS  = 1
     EOS  = 2
     PAD  = 3
+    UNK = 4
 
     MAX  = 8
 
@@ -752,11 +757,11 @@ def load_bpe_vocab(fname_tokenizer: Path, fname_added_tokens: Path | None) -> Vo
     scores:list[float] = []
     types:list[int]    = []
 
-    with open(str(tokenizer_path), encoding="utf-8") as f:
+    with open(str(fname_tokenizer), encoding="utf-8") as f:
         from transformers.models.gpt2 import tokenization_gpt2
         bpe_tokenizer = json.load(f)
-        reverse_vocab = {id: encoded_tok for encoded_tok, id in tokenizer.items()}
-        for i, _ in enumerate(tokenizer):
+        reverse_vocab = {id: encoded_tok for encoded_tok, id in bpe_tokenizer.items()}
+        for i, _ in enumerate(bpe_tokenizer):
             texts.append(reverse_vocab[i])
             scores.append(0.)
             types.append(TokenType.NORMAL.value)
@@ -766,14 +771,14 @@ def load_bpe_vocab(fname_tokenizer: Path, fname_added_tokens: Path | None) -> Vo
             added_tokens = json.load(f)
     else:
         fname_tokenizer_json = fname_tokenizer.parent / 'tokenizer.json'
-        if not tokenizer_json_file.is_file():
+        if not fname_tokenizer_json.is_file():
             added_tokens = {}
         else:
             with open(fname_tokenizer_json, encoding='utf-8') as f:
                 tokenizer_json = json.load(f)
             added_tokens = {item['content']: item['id']
                 for item in tokenizer_json.get('added_tokens', [])
-                if item['content'] not in self.bpe_tokenizer}
+                if item['content'] not in bpe_tokenizer}
 
     vocab_size = len(texts)
     if added_tokens:
@@ -905,17 +910,16 @@ class Tokenizer:
                 conf = json.load(f)
             for name in special_names:
                 item = conf.get(f'{name}_token')
-
                 if isinstance(item, str):
-                    content = entry
-                elif isinstance(entry, dict):
-                    entry_content = entry.get('content')
+                    content = item
+                elif isinstance(item, dict):
+                    entry_content = item.get('content')
                     if not isinstance(entry_content, str):
                         continue
                     content = entry_content
                 else:
                     continue
-                tokid = next((tok.get('id') for tok in added_tokens if atok.get('content') == content), None)
+                tokid = next((tok.get('id') for tok in added_tokens if tok.get('content') == content), None)
                 self.special_tokens[name] = tokid
             return True
 
@@ -1024,8 +1028,8 @@ def permute_qk(weights: np.ndarray, n_head: int, n_head_kv: int) -> np.ndarray:
 
 @dataclass
 class ModelConverter:
-    config:      ModelConfig             = ModelConfig()
-    tokenizer:   Tokenizer               = Tokenizer()
+    config:      ModelConfig             = field(default_factory=ModelConfig)
+    tokenizer:   Tokenizer               = field(default_factory=Tokenizer)
     tensor_map:  dict[str, TensorLoader] = None
 
     def load(self, path: Path, vocab_type:str, quant_type:QuantType, quant_group_size:int) -> bool:
@@ -1043,8 +1047,15 @@ class ModelConverter:
     def print_summary(self):
         self.config.print_summary()
 
+    def _load_safetensors_file(self, path: Path):
+        # Assumed function for loading safetensors, replace with actual logic
+        # This is a placeholder and needs actual implementation details based on safetensors structure
+        print(f"Loading safetensors file {path} ...")
+        safetensors_data = load_file(path)
+        return safetensors_data
+
     def _load_model(self, path: Path) -> bool:
-        globs = ["consolidated.00.pth", "pytorch_model-00001-of-*.bin", "*.pt", "pytorch_model.bin"]
+        globs = ["consolidated.00.pth", "pytorch_model-00001-of-*.bin", "*.pt", "pytorch_model.bin", "model-00001-of-*.safetensors"]
         files = [file for glob in globs for file in path.glob(glob)]
         if not files:
             raise Exception(f"Can't find model in directory {path}")
@@ -1056,7 +1067,10 @@ class ModelConverter:
         paths = find_multifile_paths(files[0])
         for path in paths:
             print(f"Loading model file {path} ...")
-            r = self._load_torch_file(open(path, 'rb'), path)
+            if path.suffix == '.safetensors':
+                r = self._load_safetensors_file(path)
+            else:
+                r = self._load_torch_file(open(path, 'rb'), path)
             tensor_map = {**tensor_map, **r}
         self.tensor_map = tensor_map
         return True
@@ -1119,7 +1133,10 @@ class ModelConverter:
 
         for name, tensor_loader in self.tensor_map.items():
             tensor_type = TensorType.NONE
-            tensor = tensor_loader.load()
+            if type(tensor_loader) != np.ndarray:
+                tensor = tensor_loader.load()
+            else:
+                tensor = tensor_loader
             layer_id = 0
             if name == 'model.embed_tokens.weight':
                 tensor_type = TensorType.TOKEN_EMBD_TABLE
@@ -1165,7 +1182,10 @@ class ModelConverter:
             if needq:
                 tensor, scales = TensorLoader.quantize(tensor, data_type, group_size)
             else:
-                tensor = tensor_loader.load().astype(np.float32)
+                if type(tensor_loader) != np.ndarray:
+                    tensor = tensor_loader.load().astype(np.float32)
+                else:
+                    tensor = tensor_loader.astype(np.float32)
                 scales = None
             ofile_size += outf.dump_named_tensor(name, tensor, scales, tensor_type, layer_id)
 
